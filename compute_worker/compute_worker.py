@@ -18,6 +18,9 @@ from urllib.parse import urlparse
 from urllib.request import urlretrieve
 from zipfile import ZipFile, BadZipFile
 
+import pprint
+import textwrap
+
 import requests
 import websockets
 import yaml
@@ -27,6 +30,60 @@ from kombu import Queue, Exchange
 from urllib3 import Retry
 
 logger = logging.getLogger()
+
+# ------------------------------------------------------------------
+# Helpers for readable and safe logging of run arguments
+# ------------------------------------------------------------------
+# Mask these keys when logging to avoid leaking secrets
+SENSITIVE_KEYS = {
+    "secret", "token", "password", "api_key", "apikey",
+    "authorization", "auth", "key"
+}
+
+def _mask_if_sensitive(key, value):
+    """
+    Mask values if the key name indicates sensitive information.
+    """
+    try:
+        if key and str(key).lower() in SENSITIVE_KEYS:
+            return "***"
+    except Exception:
+        # Be conservative: if something goes wrong, do not log the value
+        return "***"
+    return value
+
+def _format_run_args(args, max_scalar_len=200, max_nested_len=1000):
+    """
+    Formats run_args into a human-readable multi-line string.
+
+    - Sorts dictionary keys for consistency
+    - Masks sensitive keys
+    - Trims overly long scalar and nested values
+    """
+    if not isinstance(args, dict):
+        return pprint.pformat(args, indent=2, width=120)
+
+    lines = []
+    for k in sorted(args.keys()):
+        v = _mask_if_sensitive(k, args[k])
+
+        if isinstance(v, (dict, list, tuple)):
+            try:
+                nested = json.dumps(v, indent=2, ensure_ascii=False)
+            except Exception:
+                # Fallback if value is not JSON-serializable
+                nested = pprint.pformat(v, indent=2, width=120)
+            if len(nested) > max_nested_len:
+                nested = nested[: max_nested_len - 3] + "..."
+            lines.append(f"  - {k}:")
+            lines.append(textwrap.indent(nested, "    "))
+        else:
+            s = str(v)
+            if len(s) > max_scalar_len:
+                s = s[: max_scalar_len - 3] + "..."
+            lines.append(f"  - {k}: {s}")
+
+    return "\n".join(lines)
 
 
 # -----------------------------------------------
@@ -105,7 +162,8 @@ class ExecutionTimeLimitExceeded(Exception):
 # -----------------------------------------------------------------------------
 @task(name="compute_worker_run")
 def run_wrapper(run_args):
-    logger.info(f"Received run arguments: {run_args}")
+    # Improved readability of incoming arguments; sensitive fields masked
+    logger.info("Received run arguments:\n%s", _format_run_args(run_args))
     run = Run(run_args)
 
     try:
